@@ -4,11 +4,9 @@ from pydantic import BaseModel, Field
 
 app = FastAPI()
 
-# What the user must send. Empty text -> automatic 422 error (not a crash)
 class ExtractRequest(BaseModel):
     text: str = Field(min_length=1)
 
-# What we promise to send back
 class Invoice(BaseModel):
     vendor: str
     amount: float
@@ -34,13 +32,21 @@ def ask_llm(text):
         },
         timeout=25,
     )
+    r.raise_for_status()
     return json.loads(r.json()["choices"][0]["message"]["content"])
 
 def regex_backup(text):
     """Plan B if the AI fails."""
     date = re.search(r"\d{4}-\d{2}-\d{2}", text)
     cur = re.search(r"\b(USD|EUR|GBP)\b", text)
-    amt = re.search(r"(\d[\d,]*\.?\d*)", text)
+
+    num = r"(\d[\d,]*(?:\.\d+)?)"
+    amt = (
+        re.search(num + r"\s*(?:USD|EUR|GBP)", text)
+        or re.search(r"(?:USD|EUR|GBP)\s*" + num, text)
+        or re.search(r"(?:total|amount)[^\d]{0,30}" + num, text, re.I)
+    )
+
     ven = re.search(r"[A-Z][\w-]*(?:\s+[A-Z][\w.&-]*)*\s+(?:Ltd|Inc|LLC|GmbH|Corp)\.?", text)
     return {
         "vendor": ven.group(0) if ven else "Unknown",
@@ -50,7 +56,6 @@ def regex_backup(text):
     }
 
 def clean(d):
-    """Tidy the values so they always match the schema."""
     amount = float(str(d.get("amount", 0)).replace(",", "").replace("$", "") or 0)
     date = re.search(r"\d{4}-\d{2}-\d{2}", str(d.get("date", "")))
     return Invoice(
@@ -64,7 +69,8 @@ def clean(d):
 def extract(req: ExtractRequest):
     try:
         return clean(ask_llm(req.text))
-    except Exception:
+    except Exception as e:
+        print("LLM FAILED:", repr(e))   # yeh Render Logs me dikhega
         try:
             return clean(regex_backup(req.text))
         except Exception:
